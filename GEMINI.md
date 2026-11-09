@@ -1,2 +1,0 @@
-# Gemini agent instructions
-Follow `AGENTS.md` as the single source of project scope and safety instructions. Read `docs/PROJECT_SCOPE.md`, `docs/INTERFACE_CONTRACT.md`, and your developer role document. Make no silent cross-module contract changes. Commit only verifiable Phase 1 proxy, metadata logging, and read-only monitoring improvements. Explain anything not implemented rather than claiming success.
