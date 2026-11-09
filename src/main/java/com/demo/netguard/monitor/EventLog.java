@@ -11,7 +11,9 @@ import java.time.Instant;
 import java.util.*;
 
 /** Thread-safe append-only JSONL file and bounded dashboard history restored at startup.
- *  Replay reads at most the final 4 MiB and keeps the latest 500 valid event records.
+ *  Synchronized appends serialize writes from concurrent proxy workers so each client event
+ *  is stored as a complete JSONL record. Replay reads at most the final 4 MiB and keeps the
+ *  latest 500 valid event records.
  */
 public final class EventLog {
     private final Deque<FlowEvent> events = new ArrayDeque<>();
