@@ -34,18 +34,56 @@ public final class ForwardProxyServer implements AutoCloseable {
 
     public ForwardProxyServer(int port, String bindIp, Set<String> clients,
                               EventLog log, int demoPort) throws IOException {
-        InetAddress bind = InetAddress.getByName(bindIp);
-        if (!(bind instanceof Inet4Address) || bind.isAnyLocalAddress() ||
-            !(bind.isLoopbackAddress() || bind.isSiteLocalAddress())) {
-            throw new IllegalArgumentException("Bind must be explicit loopback or private IPv4 address");
-        }
+        if (clients == null) throw new IllegalArgumentException("Client allowlist is required");
+        InetAddress bind = parseIpv4Literal(bindIp);
+        if (bind == null || !(bind.isLoopbackAddress() || isPrivateIpv4(bind)))
+            throw new IllegalArgumentException("Bind must be an explicit loopback or private IPv4 literal");
         this.lan = !bind.isLoopbackAddress();
-        this.clientAllowlist = Set.copyOf(clients);
-        if (lan && this.clientAllowlist.isEmpty())
-            throw new IllegalArgumentException("LAN proxy requires approved client IPs");
+        Set<String> approvedClients = new HashSet<>();
+        if (lan) {
+            for (String client : clients) {
+                InetAddress address = parseIpv4Literal(client);
+                if (address == null || !isPrivateIpv4(address))
+                    throw new IllegalArgumentException("Allowlist entries must be private IPv4 literals");
+                approvedClients.add(address.getHostAddress());
+            }
+        } else {
+            approvedClients.addAll(clients);
+        }
+        this.clientAllowlist = Set.copyOf(approvedClients);
+        if (lan && this.clientAllowlist.isEmpty()) throw new IllegalArgumentException("LAN proxy requires approved client IPs");
+        if (port < 0 || port > 65535) throw new IllegalArgumentException("Proxy port must be between 0 and 65535");
+        if (demoPort < 1 || demoPort > 65535) throw new IllegalArgumentException("Demo port must be between 1 and 65535");
         this.log = log;this.demoPort = demoPort;
         listener = new ServerSocket();listener.bind(new InetSocketAddress(bind,port),50);
         acceptor = new Thread(this::accept,"proxy-accept");acceptor.setDaemon(true);
+    }
+
+    private static InetAddress parseIpv4Literal(String value) {
+        if (value == null) return null;
+        String[] octets = value.split("\\.", -1);
+        if (octets.length != 4) return null;
+        byte[] address = new byte[4];
+        for (int i = 0; i < octets.length; i++) {
+            String octet = octets[i];
+            if (octet.isEmpty() || octet.length() > 3 || !octet.matches("[0-9]+")
+                || (octet.length() > 1 && octet.charAt(0) == '0')) return null;
+            int number;
+            try { number = Integer.parseInt(octet); }
+            catch (NumberFormatException ex) { return null; }
+            if (number > 255) return null;
+            address[i] = (byte) number;
+        }
+        try { return InetAddress.getByAddress(address); }
+        catch (UnknownHostException impossible) { throw new AssertionError(impossible); }
+    }
+
+    private static boolean isPrivateIpv4(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        int first = Byte.toUnsignedInt(bytes[0]);
+        int second = Byte.toUnsignedInt(bytes[1]);
+        return first == 10 || (first == 172 && second >= 16 && second <= 31)
+            || (first == 192 && second == 168);
     }
     public synchronized void start(){
         if(closed)throw new IllegalStateException("Proxy is already closed");

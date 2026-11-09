@@ -41,8 +41,29 @@ public final class ForwardProxyServerTest {
         }
     }
 
+    private static void rejectsConfiguration(Path events, int port, String bindIp,
+                                             Set<String> allowlist, int demoPort,
+                                             String description) throws Exception {
+        try {
+            new ForwardProxyServer(port, bindIp, allowlist,
+                new EventLog(events), demoPort).close();
+            throw new AssertionError(description);
+        } catch (IllegalArgumentException expected) {
+            check(true, description);
+        }
+    }
+
     public static void main(String[] args) throws Exception {
         Path directory = Files.createTempDirectory("dev1-proxy-test-");
+        rejectsConfiguration(directory.resolve("invalid-bind.jsonl"), 0, "localhost",
+            Set.of(), 9090, "proxy bind must be an explicit IPv4 literal");
+        rejectsConfiguration(directory.resolve("public-bind.jsonl"), 0, "203.0.113.10",
+            Set.of("192.168.1.20"), 9090, "LAN proxy refuses non-private bind addresses");
+        rejectsConfiguration(directory.resolve("invalid-client.jsonl"), 0, "192.168.1.10",
+            Set.of("localhost"), 9090, "LAN allowlist entries must be private IPv4 literals");
+        rejectsConfiguration(directory.resolve("empty-allowlist.jsonl"), 0, "192.168.1.10",
+            Set.of(), 9090, "LAN proxy requires at least one approved client");
+
         HttpServer mock = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         mock.setExecutor(java.util.concurrent.ForkJoinPool.commonPool());
         CountDownLatch simultaneous = new CountDownLatch(2);
