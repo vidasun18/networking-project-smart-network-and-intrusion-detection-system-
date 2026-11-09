@@ -162,10 +162,45 @@ public final class ForwardProxyServer implements AutoCloseable {
         if(d.method().equals("CONNECT") && d.port()!=443)throw new IOException("Only CONNECT 443 allowed");
         if(!d.method().equals("CONNECT") && d.port()!=80)throw new IOException("Only HTTP 80 allowed");
         for(InetAddress ip : InetAddress.getAllByName(d.host())) {
-            if(!ip.isAnyLocalAddress() && !ip.isLoopbackAddress() && !ip.isLinkLocalAddress()
-                && !ip.isSiteLocalAddress() && !ip.isMulticastAddress()) return ip;
+            if(isPublicDestinationAddress(ip)) return ip;
         }
         throw new IOException("Restricted destination");
+    }
+
+    /** Filters known nonpublic and special-purpose address ranges for outbound proxy use. */
+    static boolean isPublicDestinationAddress(InetAddress address) {
+        byte[] bytes = address.getAddress();
+        if (address instanceof Inet4Address) {
+            int first = Byte.toUnsignedInt(bytes[0]);
+            int second = Byte.toUnsignedInt(bytes[1]);
+            int third = Byte.toUnsignedInt(bytes[2]);
+            return first != 0 && first != 10 && first != 127 && first < 224
+                && !(first == 100 && second >= 64 && second <= 127)
+                && !(first == 169 && second == 254)
+                && !(first == 172 && second >= 16 && second <= 31)
+                && !(first == 192 && second == 168)
+                && !(first == 192 && second == 0 && third == 0)
+                && !(first == 192 && second == 88 && third == 99)
+                && !(first == 192 && second == 0 && third == 2)
+                && !(first == 198 && (second == 18 || second == 19))
+                && !(first == 198 && second == 51 && third == 100)
+                && !(first == 203 && second == 0 && third == 113);
+        }
+        if (!(address instanceof Inet6Address)) return false;
+
+        // IPv6 global unicast is in 2000::/3. Exclude special-purpose and
+        // documentation blocks within that range as well.
+        boolean globalUnicast = (bytes[0] & 0xe0) == 0x20;
+        boolean protocolAssignment = Byte.toUnsignedInt(bytes[0]) == 0x20
+            && Byte.toUnsignedInt(bytes[1]) == 0x01 && bytes[2] == 0;
+        boolean sixToFour = Byte.toUnsignedInt(bytes[0]) == 0x20
+            && Byte.toUnsignedInt(bytes[1]) == 0x02;
+        boolean documentation = Byte.toUnsignedInt(bytes[0]) == 0x20
+            && Byte.toUnsignedInt(bytes[1]) == 0x01
+            && Byte.toUnsignedInt(bytes[2]) == 0x0d && (bytes[3] & 0xff) == 0xb8;
+        boolean expandedDocumentation = Byte.toUnsignedInt(bytes[0]) == 0x3f
+            && Byte.toUnsignedInt(bytes[1]) == 0xff && (bytes[2] & 0xf0) == 0;
+        return globalUnicast && !protocolAssignment && !sixToFour && !documentation && !expandedDocumentation;
     }
     private void serve(Socket client) {
         try(client) {
