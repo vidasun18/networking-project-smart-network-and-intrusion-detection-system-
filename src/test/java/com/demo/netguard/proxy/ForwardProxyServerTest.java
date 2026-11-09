@@ -55,6 +55,18 @@ public final class ForwardProxyServerTest {
 
     public static void main(String[] args) throws Exception {
         Path directory = Files.createTempDirectory("dev1-proxy-test-");
+        check(ForwardProxyServer.isPublicDestinationAddress(InetAddress.getByName("8.8.8.8")),
+            "globally routable IPv4 destination is allowed by address policy");
+        check(ForwardProxyServer.isPublicDestinationAddress(InetAddress.getByName("2606:4700:4700::1111")),
+            "globally routable IPv6 destination is allowed by address policy");
+        for (String blocked : new String[] {"10.1.2.3", "100.64.0.1", "127.0.0.2",
+                "169.254.169.254", "172.16.0.1", "192.0.2.1", "192.168.1.1",
+                "198.18.0.1", "198.51.100.1", "203.0.113.1", "224.0.0.1", "240.0.0.1",
+                "::", "::1", "fc00::1", "fdff::1", "fe80::1", "fec0::1", "ff02::1",
+                "2001:db8::1", "2002::1", "3fff::1"}) {
+            check(!ForwardProxyServer.isPublicDestinationAddress(InetAddress.getByName(blocked)),
+                "nonpublic destination range is rejected: " + blocked);
+        }
         rejectsConfiguration(directory.resolve("invalid-bind.jsonl"), 0, "localhost",
             Set.of(), 9090, "proxy bind must be an explicit IPv4 literal");
         rejectsConfiguration(directory.resolve("public-bind.jsonl"), 0, "203.0.113.10",
@@ -103,6 +115,11 @@ public final class ForwardProxyServerTest {
         check(request(proxyPort, duplicate).startsWith("HTTP/1.1 400"), "duplicate Host header is rejected");
         check(request(proxyPort, "GET http://127.0.0.1/ HTTP/1.9\r\nHost: 127.0.0.1\r\n\r\n")
             .startsWith("HTTP/1.1 400"), "unsupported HTTP version is rejected");
+        for (String blocked : new String[] {"100.64.0.1", "169.254.169.254", "192.0.2.1", "198.18.0.1"}) {
+            String request = "GET http://" + blocked + "/synthetic HTTP/1.1\r\nHost: " + blocked + "\r\n\r\n";
+            check(request(proxyPort, request).startsWith("HTTP/1.1 403"),
+                "proxy denies nonpublic IPv4 destination: " + blocked);
+        }
 
         proxy.close();
         mock.stop(0);
