@@ -1,6 +1,7 @@
 package com.demo.netguard.model;
 
 import java.time.Instant;
+import java.util.Objects;
 
 /** Metadata for one proxied connection attempt; never page content or private request details.
  *
@@ -27,9 +28,33 @@ import java.time.Instant;
 public record FlowEvent(Instant at, String sourceIp, String method,
                         String destination, int port, String protocol,
                         String outcome, String reason) {
+    public FlowEvent {
+        Objects.requireNonNull(at, "at");
+    }
+
     private static String esc(String s) {
-        return (s == null ? "" : s).replace("\\", "\\\\").replace("\"", "\\\"")
-            .replace("\n", " ").replace("\r", " ");
+        if (s == null) return "";
+        StringBuilder escaped = new StringBuilder(s.length() + 16);
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> escaped.append("\\\"");
+                case '\\' -> escaped.append("\\\\");
+                case '\b' -> escaped.append("\\b");
+                case '\f' -> escaped.append("\\f");
+                case '\n' -> escaped.append("\\n");
+                case '\r' -> escaped.append("\\r");
+                case '\t' -> escaped.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        escaped.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        escaped.append(c);
+                    }
+                }
+            }
+        }
+        return escaped.toString();
     }
     public String json() {
         return "{\"at\":\"" + at + "\",\"sourceIp\":\"" + esc(sourceIp)

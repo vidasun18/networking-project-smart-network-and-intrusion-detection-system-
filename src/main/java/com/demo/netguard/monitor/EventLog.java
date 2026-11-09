@@ -2,31 +2,32 @@ package com.demo.netguard.monitor;
 
 import com.demo.netguard.model.FlowEvent;
 import java.io.IOException;
+import java.io.UncheckedIOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 
-/** Concurrent-safe append-only JSONL file and bounded current-session dashboard history.
- *  The disk file survives restart; replay and rotation are Developer 2's next tasks.
+/** Thread-safe append-only JSONL file and bounded current-session dashboard history.
+ *  Each append writes one complete FlowEvent JSON object followed by one newline.
  */
 public final class EventLog {
     private final Deque<FlowEvent> events = new ArrayDeque<>();
     private final Path file;
     private static final int LIMIT = 500;
     public EventLog(Path file) throws IOException {
-        this.file = file.toAbsolutePath().normalize();
+        this.file = Objects.requireNonNull(file, "file").toAbsolutePath().normalize();
         if (this.file.getParent() != null) Files.createDirectories(this.file.getParent());
     }
     public synchronized void append(FlowEvent event) {
-        if (events.size() >= LIMIT) events.removeFirst();
-        events.addLast(event);
+        Objects.requireNonNull(event, "event");
         try {
             Files.writeString(file, event.json() + "\n", StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
         } catch (IOException e) {
-            // Fail visibly: connection logging is an explicit requirement of the product.
-            System.err.println("NETWORK LOG WRITE FAILED: " + e.getMessage());
+            throw new UncheckedIOException("Failed to append network event to " + file, e);
         }
+        if (events.size() >= LIMIT) events.removeFirst();
+        events.addLast(event);
     }
     public synchronized String recentJson(int max, String client, String destination) {
         List<FlowEvent> copy = new ArrayList<>(events);
