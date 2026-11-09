@@ -64,9 +64,49 @@ public final class EventLogTest {
                     && line.contains("\"at\":") && line.contains("\"reason\":")),
                 "every JSONL line is a complete event object");
 
+            EventLog restarted = new EventLog(file);
+            check(restarted.summaryJson().contains("\"recentTotal\":25")
+                    && restarted.summaryJson().contains("\"connected\":24")
+                    && restarted.summaryJson().contains("\"failed\":1"),
+                "reopening the logger restores persisted events into dashboard history");
+            check(restarted.recentJson(25, "", "").contains(special.json()),
+                "replay preserves escaped event metadata");
+            restarted.append(new FlowEvent(Instant.parse("2026-11-10T12:35:00Z"),
+                "192.0.2.25", "HEAD", "example.net", 80, "HTTP", "CONNECTED",
+                "UPSTREAM_TCP_CONNECTED"));
+            check(Files.readAllLines(file).size() == count + 2,
+                "new events append after restored history without replacing prior lines");
+
+            Path corruptFile = directory.resolve("with-corrupt-record.jsonl");
+            FlowEvent validTail = new FlowEvent(Instant.parse("2026-11-10T12:35:01Z"),
+                "192.0.2.30", "CONNECT", "secure.example", 443, "HTTPS_TUNNEL", "CONNECTED",
+                "UPSTREAM_TCP_CONNECTED");
+            Files.writeString(corruptFile, special.json() + "\n{not-json}\n" + validTail.json());
+            EventLog recovered = new EventLog(corruptFile);
+            check(recovered.summaryJson().contains("\"recentTotal\":2")
+                    && recovered.recentJson(2, "", "").contains(validTail.json()),
+                "replay skips corrupt records and restores valid unterminated final records");
+            recovered.append(special);
+            List<String> recoveredLines = Files.readAllLines(corruptFile);
+            check(recoveredLines.size() == 4 && recoveredLines.get(2).equals(validTail.json())
+                    && recoveredLines.get(3).equals(special.json()),
+                "append separates a recovered final record from the next JSONL record");
+
+            Path boundedFile = directory.resolve("bounded-history.jsonl");
+            EventLog bounded = new EventLog(boundedFile);
+            for (int i = 0; i < 510; i++) {
+                bounded.append(new FlowEvent(Instant.parse("2026-11-10T12:36:00Z"),
+                    "192.0.2.40", "GET", "example.org", 80, "HTTP", "CONNECTED", "test-" + i));
+            }
+            EventLog boundedRestart = new EventLog(boundedFile);
+            check(boundedRestart.summaryJson().contains("\"recentTotal\":500"),
+                "startup replay keeps only the latest 500 in-memory records");
+            check(boundedRestart.recentJson(1, "", "").contains("test-509"),
+                "bounded replay retains the newest persisted record");
+
             Path blockedFile = directory.resolve("is-a-directory");
-            Files.createDirectory(blockedFile);
             EventLog failingLog = new EventLog(blockedFile);
+            Files.createDirectory(blockedFile);
             boolean reported = false;
             try {
                 failingLog.append(special);
