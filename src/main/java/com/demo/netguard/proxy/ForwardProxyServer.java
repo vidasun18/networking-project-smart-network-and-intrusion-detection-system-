@@ -273,10 +273,7 @@ public final class ForwardProxyServer implements AutoCloseable {
                 record(source,d,"CONNECTED","UPSTREAM_TCP_CONNECTED");
                 if(d.method().equals("CONNECT")) {
                     out.write("HTTP/1.1 200 Connection Established\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1));out.flush();
-                    InputStream remoteIn=upstream.getInputStream();OutputStream remoteOut=upstream.getOutputStream();
-                    Thread upload=new Thread(() -> copy(in,remoteOut),"tunnel-upload");upload.setDaemon(true);upload.start();
-                    copy(remoteIn,out);
-                    try{upload.join(250);}catch(InterruptedException e){Thread.currentThread().interrupt();}
+                    relayTunnel(client, upstream, in);
                 } else {
                     OutputStream remoteOut=upstream.getOutputStream();
                     String opening=d.method()+" "+d.path()+" HTTP/1.1\r\nHost: "+d.host()+(d.port()==80?"":":"+d.port())+"\r\nConnection: close\r\n";
@@ -320,6 +317,67 @@ public final class ForwardProxyServer implements AutoCloseable {
     private static void copy(InputStream from,OutputStream to) {
         try {byte[] buf=new byte[8192];int n;while((n=from.read(buf))!=-1){to.write(buf,0,n);to.flush();}}
         catch(IOException ignored){}
+    }
+
+    private static void relayTunnel(Socket client, Socket upstream, InputStream clientIn) {
+        CountDownLatch completedDirections = new CountDownLatch(2);
+        Thread upload = new Thread(() -> tunnelCopy(clientIn, client, upstream,
+            completedDirections), "tunnel-upload");
+        upload.setDaemon(true);
+        upload.start();
+
+        try {
+            tunnelCopy(upstream.getInputStream(), upstream, client, completedDirections);
+            completedDirections.await();
+        } catch (IOException e) {
+            closeTunnelSockets(client, upstream);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            closeTunnelSockets(client, upstream);
+        } finally {
+            if (upload.isAlive()) {
+                closeTunnelSockets(client, upstream);
+                upload.interrupt();
+                try { upload.join(250); }
+                catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+            }
+        }
+    }
+
+    private static void tunnelCopy(InputStream from, Socket source, Socket destination,
+                                   CountDownLatch completedDirections) {
+        try {
+            tunnelCopy(from, destination.getOutputStream(), source, destination, completedDirections);
+        } catch (IOException e) {
+            closeTunnelSockets(source, destination);
+            completedDirections.countDown();
+        }
+    }
+
+    private static void tunnelCopy(InputStream from, OutputStream to, Socket source,
+                                   Socket destination, CountDownLatch completedDirections) {
+        boolean reachedEndOfStream = false;
+        try {
+            byte[] buffer = new byte[8192];
+            int count;
+            while ((count = from.read(buffer)) != -1) to.write(buffer, 0, count);
+            reachedEndOfStream = true;
+        } catch (IOException ignored) {
+            // A failed direction closes both sockets below so the other pump cannot linger.
+        } finally {
+            if (reachedEndOfStream) {
+                try { destination.shutdownOutput(); }
+                catch (IOException ignored) { closeTunnelSockets(source, destination); }
+            } else {
+                closeTunnelSockets(source, destination);
+            }
+            completedDirections.countDown();
+        }
+    }
+
+    private static void closeTunnelSockets(Socket client, Socket upstream) {
+        try { client.close(); } catch (IOException ignored) { }
+        try { upstream.close(); } catch (IOException ignored) { }
     }
     @Override public void close() {
         closed=true;running=false;

@@ -2,6 +2,8 @@ package com.demo.netguard.proxy;
 
 import com.demo.netguard.monitor.EventLog;
 import com.sun.net.httpserver.HttpServer;
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -30,6 +32,146 @@ public final class ForwardProxyServerTest {
             socket.getOutputStream().write(message.getBytes(StandardCharsets.ISO_8859_1));
             socket.shutdownOutput();
             return new String(socket.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+        }
+    }
+
+    private static String readHeaderBlock(Socket socket) throws Exception {
+        ByteArrayOutputStream bytes = new ByteArrayOutputStream();
+        InputStream in = socket.getInputStream();
+        int value;
+        while (bytes.size() < 8192 && (value = in.read()) != -1) {
+            bytes.write(value);
+            if (bytes.toString(StandardCharsets.ISO_8859_1).endsWith("\r\n\r\n"))
+                return bytes.toString(StandardCharsets.ISO_8859_1);
+        }
+        throw new java.io.IOException("Incomplete CONNECT response headers");
+    }
+
+    private static void testTunnelHalfClose(Path directory) throws Exception {
+        String clientPayload = "opaque client tunnel bytes";
+        String upstreamPayload = "opaque upstream tunnel bytes";
+        String[] receivedPayload = new String[1];
+        CountDownLatch upstreamSawEof = new CountDownLatch(1);
+        try (ServerSocket tunnelTarget = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            Thread tunnelPeer = new Thread(() -> {
+                try (Socket peer = tunnelTarget.accept()) {
+                    peer.setSoTimeout(3000);
+                    receivedPayload[0] = new String(peer.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                    upstreamSawEof.countDown();
+                    peer.getOutputStream().write(upstreamPayload.getBytes(StandardCharsets.UTF_8));
+                    peer.shutdownOutput();
+                } catch (Exception ignored) { }
+            }, "tunnel-half-close-test-peer");
+            tunnelPeer.setDaemon(true);
+            tunnelPeer.start();
+
+            EventLog tunnelEvents = new EventLog(directory.resolve("tunnel-events.jsonl"));
+            try (ForwardProxyServer tunnelProxy = new ForwardProxyServer(0, "127.0.0.1",
+                    Set.of(), tunnelEvents, tunnelTarget.getLocalPort())) {
+                tunnelProxy.start();
+                try (Socket client = new Socket("127.0.0.1", tunnelProxy.port())) {
+                    client.setSoTimeout(5000);
+                    String connect = "CONNECT 127.0.0.1:" + tunnelTarget.getLocalPort()
+                        + " HTTP/1.1\r\nHost: 127.0.0.1:" + tunnelTarget.getLocalPort() + "\r\n\r\n";
+                    client.getOutputStream().write(connect.getBytes(StandardCharsets.ISO_8859_1));
+                    client.getOutputStream().flush();
+                    check(readHeaderBlock(client).startsWith("HTTP/1.1 200 Connection Established"),
+                        "CONNECT establishes the synthetic tunnel");
+
+                    client.getOutputStream().write(clientPayload.getBytes(StandardCharsets.UTF_8));
+                    client.shutdownOutput();
+                    String response = new String(client.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                    check(upstreamSawEof.await(1, TimeUnit.SECONDS),
+                        "client half-close propagates promptly to the upstream socket");
+                    check(clientPayload.equals(receivedPayload[0]), "CONNECT preserves client tunnel bytes");
+                    check(upstreamPayload.equals(response), "upstream half-close relays its final bytes and EOF");
+                }
+            } finally {
+                tunnelTarget.close();
+                tunnelPeer.join(1000);
+            }
+        }
+    }
+
+    private static void testTunnelClientDisconnect(Path directory) throws Exception {
+        String clientPayload = "bytes before client disconnect";
+        String[] receivedPayload = new String[1];
+        CountDownLatch upstreamSawDisconnect = new CountDownLatch(1);
+        try (ServerSocket tunnelTarget = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            Thread tunnelPeer = new Thread(() -> {
+                try (Socket peer = tunnelTarget.accept()) {
+                    peer.setSoTimeout(3000);
+                    receivedPayload[0] = new String(peer.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+                    upstreamSawDisconnect.countDown();
+                } catch (Exception ignored) { }
+            }, "tunnel-disconnect-test-peer");
+            tunnelPeer.setDaemon(true);
+            tunnelPeer.start();
+
+            EventLog tunnelEvents = new EventLog(directory.resolve("disconnect-tunnel-events.jsonl"));
+            try (ForwardProxyServer tunnelProxy = new ForwardProxyServer(0, "127.0.0.1",
+                    Set.of(), tunnelEvents, tunnelTarget.getLocalPort())) {
+                tunnelProxy.start();
+                try (Socket client = new Socket("127.0.0.1", tunnelProxy.port())) {
+                    client.setSoTimeout(3000);
+                    String connect = "CONNECT 127.0.0.1:" + tunnelTarget.getLocalPort()
+                        + " HTTP/1.1\r\nHost: 127.0.0.1:" + tunnelTarget.getLocalPort() + "\r\n\r\n";
+                    client.getOutputStream().write(connect.getBytes(StandardCharsets.ISO_8859_1));
+                    client.getOutputStream().flush();
+                    check(readHeaderBlock(client).startsWith("HTTP/1.1 200 Connection Established"),
+                        "CONNECT opens before client disconnect test");
+                    client.getOutputStream().write(clientPayload.getBytes(StandardCharsets.UTF_8));
+                    client.getOutputStream().flush();
+                }
+                check(upstreamSawDisconnect.await(2, TimeUnit.SECONDS),
+                    "full client disconnect propagates promptly to upstream");
+                check(clientPayload.equals(receivedPayload[0]),
+                    "upstream receives buffered tunnel bytes before disconnect");
+            } finally {
+                tunnelTarget.close();
+                tunnelPeer.join(1000);
+            }
+        }
+    }
+
+    private static void testTunnelShutdown(Path directory) throws Exception {
+        CountDownLatch upstreamClosed = new CountDownLatch(1);
+        try (ServerSocket tunnelTarget = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            Thread tunnelPeer = new Thread(() -> {
+                try (Socket peer = tunnelTarget.accept()) {
+                    peer.setSoTimeout(3000);
+                    if (peer.getInputStream().read() == -1) upstreamClosed.countDown();
+                } catch (Exception ignored) { }
+            }, "tunnel-shutdown-test-peer");
+            tunnelPeer.setDaemon(true);
+            tunnelPeer.start();
+
+            EventLog tunnelEvents = new EventLog(directory.resolve("shutdown-tunnel-events.jsonl"));
+            ForwardProxyServer tunnelProxy = new ForwardProxyServer(0, "127.0.0.1",
+                Set.of(), tunnelEvents, tunnelTarget.getLocalPort());
+            Socket client = new Socket("127.0.0.1", tunnelProxy.port());
+            try {
+                client.setSoTimeout(3000);
+                tunnelProxy.start();
+                String connect = "CONNECT 127.0.0.1:" + tunnelTarget.getLocalPort()
+                    + " HTTP/1.1\r\nHost: 127.0.0.1:" + tunnelTarget.getLocalPort() + "\r\n\r\n";
+                client.getOutputStream().write(connect.getBytes(StandardCharsets.ISO_8859_1));
+                client.getOutputStream().flush();
+                check(readHeaderBlock(client).startsWith("HTTP/1.1 200 Connection Established"),
+                    "CONNECT opens before proxy shutdown test");
+
+                long started = System.nanoTime();
+                tunnelProxy.close();
+                long elapsedMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started);
+                check(elapsedMs < 2000, "proxy shutdown releases an idle tunnel promptly");
+                check(upstreamClosed.await(1, TimeUnit.SECONDS),
+                    "proxy shutdown closes the upstream tunnel socket");
+            } finally {
+                client.close();
+                tunnelProxy.close();
+                tunnelTarget.close();
+                tunnelPeer.join(1000);
+            }
         }
     }
 
@@ -135,6 +277,9 @@ public final class ForwardProxyServerTest {
             check(request(proxyPort, request).startsWith("HTTP/1.1 403"),
                 "proxy denies nonpublic IPv4 destination: " + blocked);
         }
+        testTunnelHalfClose(directory);
+        testTunnelClientDisconnect(directory);
+        testTunnelShutdown(directory);
 
         proxy.close();
         mock.stop(0);
