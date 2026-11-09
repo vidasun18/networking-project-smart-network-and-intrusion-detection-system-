@@ -5,7 +5,9 @@ import java.io.UncheckedIOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -43,14 +45,14 @@ public final class EventLogTest {
             Path file = directory.resolve("events.jsonl");
             EventLog log = new EventLog(file);
             log.append(special);
-            int count = 24;
-            ExecutorService workers = Executors.newFixedThreadPool(6);
+            int count = 100;
+            ExecutorService workers = Executors.newFixedThreadPool(16);
             try {
                 List<Future<?>> writes = new java.util.ArrayList<>();
                 for (int i = 0; i < count; i++) {
                     int eventNumber = i;
                     writes.add(workers.submit(() -> log.append(new FlowEvent(
-                        Instant.parse("2026-11-10T12:34:56Z"), "192.0.2." + eventNumber,
+                        Instant.parse("2026-11-10T12:34:56Z"), "10.0.0." + (eventNumber + 1),
                         "CONNECT", "example.com", 443, "HTTPS_TUNNEL", "CONNECTED",
                         "UPSTREAM_TCP_CONNECTED"))));
                 }
@@ -63,13 +65,23 @@ public final class EventLogTest {
             check(lines.stream().allMatch(line -> line.startsWith("{") && line.endsWith("}")
                     && line.contains("\"at\":") && line.contains("\"reason\":")),
                 "every JSONL line is a complete event object");
+            Set<String> loggedClients = new HashSet<>();
+            for (int i = 1; i <= count; i++) {
+                String sourceIp = "10.0.0." + i;
+                long occurrences = lines.stream()
+                    .filter(line -> line.contains("\"sourceIp\":\"" + sourceIp + "\""))
+                    .count();
+                if (occurrences == 1) loggedClients.add(sourceIp);
+            }
+            check(loggedClients.size() == count,
+                "simultaneous events from 100 distinct clients are each written exactly once");
 
             EventLog restarted = new EventLog(file);
-            check(restarted.summaryJson().contains("\"recentTotal\":25")
-                    && restarted.summaryJson().contains("\"connected\":24")
+            check(restarted.summaryJson().contains("\"recentTotal\":101")
+                    && restarted.summaryJson().contains("\"connected\":100")
                     && restarted.summaryJson().contains("\"failed\":1"),
                 "reopening the logger restores persisted events into dashboard history");
-            check(restarted.recentJson(25, "", "").contains(special.json()),
+            check(restarted.recentJson(101, "", "").contains(special.json()),
                 "replay preserves escaped event metadata");
             restarted.append(new FlowEvent(Instant.parse("2026-11-10T12:35:00Z"),
                 "192.0.2.25", "HEAD", "example.net", 80, "HTTP", "CONNECTED",
@@ -91,6 +103,32 @@ public final class EventLogTest {
             check(recoveredLines.size() == 4 && recoveredLines.get(2).equals(validTail.json())
                     && recoveredLines.get(3).equals(special.json()),
                 "append separates a recovered final record from the next JSONL record");
+
+            EventLog searchable = new EventLog(directory.resolve("searchable.jsonl"));
+            FlowEvent latest = new FlowEvent(Instant.parse("2026-11-10T12:37:03Z"),
+                "10.0.0.1", "GET", "api.Example.com", 80, "HTTP", "CONNECTED", "latest");
+            FlowEvent oldest = new FlowEvent(Instant.parse("2026-11-10T12:37:01Z"),
+                "10.0.0.1", "GET", "example.com", 80, "HTTP", "CONNECTED", "oldest");
+            FlowEvent middle = new FlowEvent(Instant.parse("2026-11-10T12:37:02Z"),
+                "10.0.0.1", "CONNECT", "secure.example.com", 443, "HTTPS_TUNNEL", "CONNECTED", "middle");
+            FlowEvent otherClient = new FlowEvent(Instant.parse("2026-11-10T12:37:04Z"),
+                "10.0.0.2", "GET", "example.com", 80, "HTTP", "CONNECTED", "other-client");
+            searchable.append(latest);
+            searchable.append(oldest);
+            searchable.append(middle);
+            searchable.append(otherClient);
+            String filtered = searchable.recentJson(2, "10.0.0.1", "EXAMPLE.COM");
+            int middlePosition = filtered.indexOf("2026-11-10T12:37:02Z");
+            int latestPosition = filtered.indexOf("2026-11-10T12:37:03Z");
+            check(middlePosition >= 0 && latestPosition > middlePosition
+                    && !filtered.contains("oldest") && !filtered.contains("other-client"),
+                "client and case-insensitive domain filters return the latest matches in time order");
+            String oneResult = searchable.recentJson(1, "10.0.0.1", "example.com");
+            check(oneResult.contains("latest") && !oneResult.contains("middle"),
+                "maximum result count selects the newest matching record");
+            check(searchable.recentJson(10, "10.0.0.99", "").equals("[]")
+                    && searchable.recentJson(0, "", "").equals("[]"),
+                "client filters and zero result limit return an empty JSON array when unmatched");
 
             Path boundedFile = directory.resolve("bounded-history.jsonl");
             EventLog bounded = new EventLog(boundedFile);
