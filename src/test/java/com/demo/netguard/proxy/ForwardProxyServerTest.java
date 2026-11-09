@@ -11,6 +11,8 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Executors;
@@ -175,6 +177,79 @@ public final class ForwardProxyServerTest {
         }
     }
 
+    private static void testHeadForwarding(Path directory) throws Exception {
+        String[] receivedRequest = new String[1];
+        CountDownLatch requestReceived = new CountDownLatch(1);
+        try (ServerSocket headTarget = new ServerSocket(0, 1, InetAddress.getByName("127.0.0.1"))) {
+            Thread headPeer = new Thread(() -> {
+                try (Socket peer = headTarget.accept()) {
+                    peer.setSoTimeout(3000);
+                    receivedRequest[0] = readHeaderBlock(peer);
+                    requestReceived.countDown();
+                    peer.getOutputStream().write(("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n"
+                        + "Connection: close\r\n\r\n").getBytes(StandardCharsets.ISO_8859_1));
+                    peer.shutdownOutput();
+                } catch (Exception ignored) { }
+            }, "head-forwarding-test-peer");
+            headPeer.setDaemon(true);
+            headPeer.start();
+
+            EventLog headEvents = new EventLog(directory.resolve("head-events.jsonl"));
+            try (ForwardProxyServer headProxy = new ForwardProxyServer(0, "127.0.0.1",
+                    Set.of(), headEvents, headTarget.getLocalPort())) {
+                headProxy.start();
+                String headRequest = "HEAD http://127.0.0.1:" + headTarget.getLocalPort()
+                    + "/head-probe HTTP/1.1\r\nHost: 127.0.0.1:" + headTarget.getLocalPort() + "\r\n\r\n";
+                String response = request(headProxy.port(), headRequest);
+                check(requestReceived.await(1, TimeUnit.SECONDS), "mock upstream receives HEAD request");
+                check(receivedRequest[0].startsWith("HEAD /head-probe HTTP/1.1"),
+                    "proxy forwards the HEAD method and origin-form target");
+                check(response.startsWith("HTTP/1.1 200 OK") && response.endsWith("\r\n\r\n"),
+                    "HEAD response headers are relayed without a body");
+            } finally {
+                headTarget.close();
+                headPeer.join(1000);
+            }
+        }
+    }
+
+    private static void testWorkerPoolSaturation(Path directory) throws Exception {
+        List<Socket> waitingClients = new ArrayList<>();
+        ForwardProxyServer saturationProxy = new ForwardProxyServer(0, "127.0.0.1",
+            Set.of(), new EventLog(directory.resolve("saturation-events.jsonl")), 9090);
+        try {
+            saturationProxy.start();
+            for (int i = 0; i < 81; i++) {
+                Socket client = new Socket("127.0.0.1", saturationProxy.port());
+                client.setSoTimeout(4000);
+                waitingClients.add(client);
+            }
+            String overflowResponse = new String(
+                waitingClients.get(80).getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            check(overflowResponse.startsWith("HTTP/1.1 503 Service Unavailable"),
+                "proxy rejects connections after 16 workers and 64 queued requests");
+        } finally {
+            for (Socket client : waitingClients) {
+                try { client.close(); } catch (Exception ignored) { }
+            }
+            saturationProxy.close();
+        }
+    }
+
+    private static void testDeniedEventOnce(Path directory) throws Exception {
+        Path eventFile = directory.resolve("denied-events.jsonl");
+        try (ForwardProxyServer deniedProxy = new ForwardProxyServer(0, "127.0.0.1", Set.of(),
+                new EventLog(eventFile), 9090)) {
+            deniedProxy.start();
+            String denied = "GET http://192.0.2.1/synthetic HTTP/1.1\r\nHost: 192.0.2.1\r\n\r\n";
+            check(request(deniedProxy.port(), denied).startsWith("HTTP/1.1 403"),
+                "unsafe destination request is denied");
+        }
+        String jsonl = Files.readString(eventFile);
+        check(jsonl.lines().count() == 1 && jsonl.contains("\"outcome\":\"DENIED\""),
+            "one denied request writes exactly one DENIED event");
+    }
+
     private static boolean connectionRefused(int port) {
         try (Socket ignored = new Socket("127.0.0.1", port)) {
             return false;
@@ -272,11 +347,38 @@ public final class ForwardProxyServerTest {
         check(request(proxyPort, duplicate).startsWith("HTTP/1.1 400"), "duplicate Host header is rejected");
         check(request(proxyPort, "GET http://127.0.0.1/ HTTP/1.9\r\nHost: 127.0.0.1\r\n\r\n")
             .startsWith("HTTP/1.1 400"), "unsupported HTTP version is rejected");
+        for (String authority : new String[] {"example.com", "example.com:0", "example.com:65536",
+                "bad..host:443", "example.com:abc", "[::1]:443"}) {
+            String invalidConnect = "CONNECT " + authority + " HTTP/1.1\r\nHost: " + authority + "\r\n\r\n";
+            check(request(proxyPort, invalidConnect).startsWith("HTTP/1.1 400"),
+                "invalid CONNECT authority is rejected: " + authority);
+        }
+        String malformedHeader = "GET http://127.0.0.1:" + mock.getAddress().getPort()
+            + "/ HTTP/1.1\r\nHost: 127.0.0.1:" + mock.getAddress().getPort()
+            + "\r\nHeader Without Colon\r\n\r\n";
+        check(request(proxyPort, malformedHeader).startsWith("HTTP/1.1 400"),
+            "malformed header line is rejected");
+        String oversizedHeader = "X-Oversized: " + "x".repeat(8200);
+        String oversizedRequest = "GET http://127.0.0.1:" + mock.getAddress().getPort()
+            + "/ HTTP/1.1\r\nHost: 127.0.0.1:" + mock.getAddress().getPort()
+            + "\r\n" + oversizedHeader + "\r\n\r\n";
+        check(request(proxyPort, oversizedRequest).startsWith("HTTP/1.1 400"),
+            "oversized header line is rejected");
+        StringBuilder tooManyHeaders = new StringBuilder("GET http://127.0.0.1:")
+            .append(mock.getAddress().getPort()).append("/ HTTP/1.1\r\nHost: 127.0.0.1:")
+            .append(mock.getAddress().getPort()).append("\r\n");
+        for (int i = 0; i < 47; i++) tooManyHeaders.append("X-Test-").append(i).append(": value\r\n");
+        tooManyHeaders.append("\r\n");
+        check(request(proxyPort, tooManyHeaders.toString()).startsWith("HTTP/1.1 400"),
+            "request exceeding header-count limit is rejected");
         for (String blocked : new String[] {"100.64.0.1", "169.254.169.254", "192.0.2.1", "198.18.0.1"}) {
             String request = "GET http://" + blocked + "/synthetic HTTP/1.1\r\nHost: " + blocked + "\r\n\r\n";
             check(request(proxyPort, request).startsWith("HTTP/1.1 403"),
                 "proxy denies nonpublic IPv4 destination: " + blocked);
         }
+        testHeadForwarding(directory);
+        testWorkerPoolSaturation(directory);
+        testDeniedEventOnce(directory);
         testTunnelHalfClose(directory);
         testTunnelClientDisconnect(directory);
         testTunnelShutdown(directory);
