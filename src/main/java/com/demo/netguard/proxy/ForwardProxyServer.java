@@ -24,6 +24,7 @@ public final class ForwardProxyServer implements AutoCloseable {
         Thread t = new Thread(r,"proxy-worker");t.setDaemon(true);return t;
     });
     private final boolean lan;
+    private final boolean enforceClientAllowlist;
     private final Set<String> clientAllowlist;
     private final EventLog log;
     private final int demoPort;
@@ -34,11 +35,18 @@ public final class ForwardProxyServer implements AutoCloseable {
 
     public ForwardProxyServer(int port, String bindIp, Set<String> clients,
                               EventLog log, int demoPort) throws IOException {
+        this(port, bindIp, clients, log, demoPort, false);
+    }
+
+    /** Allows the request gate to be exercised on loopback without opening a LAN listener. */
+    ForwardProxyServer(int port, String bindIp, Set<String> clients,
+                       EventLog log, int demoPort, boolean enforceClientAllowlistOnLoopback) throws IOException {
         if (clients == null) throw new IllegalArgumentException("Client allowlist is required");
         InetAddress bind = parseIpv4Literal(bindIp);
         if (bind == null || !(bind.isLoopbackAddress() || isPrivateIpv4(bind)))
             throw new IllegalArgumentException("Bind must be an explicit loopback or private IPv4 literal");
         this.lan = !bind.isLoopbackAddress();
+        this.enforceClientAllowlist = lan || enforceClientAllowlistOnLoopback;
         Set<String> approvedClients = new HashSet<>();
         if (lan) {
             for (String client : clients) {
@@ -207,7 +215,7 @@ public final class ForwardProxyServer implements AutoCloseable {
             InputStream in=new BufferedInputStream(client.getInputStream());
             OutputStream out=client.getOutputStream();
             String source=client.getInetAddress().getHostAddress();
-            if(lan && !clientAllowlist.contains(source)) {
+            if(enforceClientAllowlist && !clientAllowlist.contains(source)) {
                 send(out,403,"Forbidden","Client IP not on authorized lab allowlist");return;
             }
             String requestLine;

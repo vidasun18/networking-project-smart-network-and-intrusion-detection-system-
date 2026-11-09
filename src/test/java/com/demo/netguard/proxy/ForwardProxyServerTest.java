@@ -94,6 +94,15 @@ public final class ForwardProxyServerTest {
         int proxyPort = proxy.port();
         check(proxyPort > 0, "proxy starts on an ephemeral port");
 
+        String authorizedRequest = "GET http://127.0.0.1:" + mock.getAddress().getPort()
+            + "/allowlist-check HTTP/1.1\r\nHost: 127.0.0.1:" + mock.getAddress().getPort() + "\r\n\r\n";
+        try (ForwardProxyServer rejectingProxy = new ForwardProxyServer(0, "127.0.0.1",
+                Set.of("192.168.1.99"), events, mock.getAddress().getPort(), true)) {
+            rejectingProxy.start();
+            check(request(rejectingProxy.port(), authorizedRequest).startsWith("HTTP/1.1 403"),
+                "runtime rejects a client IP missing from the allowlist");
+        }
+
         String validHost = "GET http://127.0.0.1:" + mock.getAddress().getPort() + "/ok HTTP/1.1\r\n"
             + "Host: 127.0.0.1:" + mock.getAddress().getPort() + "\r\nConnection: close\r\n\r\n";
         var callers = Executors.newFixedThreadPool(2);
@@ -105,6 +114,12 @@ public final class ForwardProxyServerTest {
             check(simultaneous.await(2, TimeUnit.SECONDS), "mock server observes overlapping client requests");
         } finally {
             callers.shutdownNow();
+        }
+        try (ForwardProxyServer acceptingProxy = new ForwardProxyServer(0, "127.0.0.1",
+                Set.of("127.0.0.1"), events, mock.getAddress().getPort(), true)) {
+            acceptingProxy.start();
+            check(request(acceptingProxy.port(), authorizedRequest).contains("synthetic response"),
+                "runtime accepts a client IP present in the allowlist");
         }
 
         String mismatch = "GET http://127.0.0.1:" + mock.getAddress().getPort() + "/ HTTP/1.1\r\n"
