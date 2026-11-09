@@ -1,2 +1,0 @@
-# Codex agent instructions
-Read `AGENTS.md` first, then `docs/INTERFACE_CONTRACT.md`, `docs/SAFETY_AND_PRIVACY.md`, and the role-specific file assigned by the manager. Focus only on the named feature branch. Before touching code, inspect current project status and run the baseline tests. Implement in small steps, with tests and a concise change summary. Report test output accurately, and do not introduce IDS or TLS interception.
