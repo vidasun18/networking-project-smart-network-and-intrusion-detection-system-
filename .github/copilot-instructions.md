@@ -1,0 +1,1 @@
+This is a Java 17 Phase 1 explicit forward proxy + metadata logger. Follow root `AGENTS.md`. No IDS, threat matching, HTTPS decryption or open proxy behavior. Respect Developer 1/2/3 file ownership and shared contract `docs/INTERFACE_CONTRACT.md`. Suggest automated tests for all changes, and do not capture URLs, cookies, bodies or credentials in logs.

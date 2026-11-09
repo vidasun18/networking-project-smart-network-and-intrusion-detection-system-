@@ -1,0 +1,5 @@
+# Empty by default. For an approved isolated LAN lab only:
+# 192.168.1.101
+# 192.168.1.102
+# Run on a specific private network interface, e.g. --bind 192.168.1.20
+# DO NOT bind to 0.0.0.0 or expose the server on the Internet.
