@@ -232,17 +232,26 @@ public final class EventLog {
         }
     }
 
+    /**
+     * Returns up to {@code max} newest matching events as JSON, ordered oldest to newest.
+     * Client matching is exact; destination matching is a case-insensitive domain substring.
+     */
     public synchronized String recentJson(int max, String client, String destination) {
-        List<FlowEvent> copy = new ArrayList<>(events);
-        Collections.reverse(copy);
-        StringJoiner join = new StringJoiner(",", "[", "]");
-        int returned = 0;
-        for (FlowEvent e : copy) {
-            if (!client.isEmpty() && !e.sourceIp().equals(client)) continue;
-            if (!destination.isEmpty() && !e.destination().contains(destination.toLowerCase(Locale.ROOT))) continue;
-            if (returned >= Math.max(0, Math.min(max, LIMIT))) break;
-            join.add(e.json()); returned++;
+        int limit = Math.max(0, Math.min(max, LIMIT));
+        if (limit == 0) return "[]";
+        String clientFilter = client == null ? "" : client;
+        String domainFilter = destination == null ? "" : destination.toLowerCase(Locale.ROOT);
+        List<FlowEvent> matches = new ArrayList<>();
+        for (FlowEvent event : events) {
+            if (!clientFilter.isEmpty() && !clientFilter.equals(event.sourceIp())) continue;
+            String domain = Objects.toString(event.destination(), "").toLowerCase(Locale.ROOT);
+            if (!domainFilter.isEmpty() && !domain.contains(domainFilter)) continue;
+            matches.add(event);
         }
+        matches.sort(Comparator.comparing(FlowEvent::at));
+        int first = Math.max(0, matches.size() - limit);
+        StringJoiner join = new StringJoiner(",", "[", "]");
+        for (int i = first; i < matches.size(); i++) join.add(matches.get(i).json());
         return join.toString();
     }
     public synchronized String summaryJson() {

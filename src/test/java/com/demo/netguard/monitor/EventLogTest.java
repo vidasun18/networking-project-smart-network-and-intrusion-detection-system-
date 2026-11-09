@@ -104,6 +104,32 @@ public final class EventLogTest {
                     && recoveredLines.get(3).equals(special.json()),
                 "append separates a recovered final record from the next JSONL record");
 
+            EventLog searchable = new EventLog(directory.resolve("searchable.jsonl"));
+            FlowEvent latest = new FlowEvent(Instant.parse("2026-11-10T12:37:03Z"),
+                "10.0.0.1", "GET", "api.Example.com", 80, "HTTP", "CONNECTED", "latest");
+            FlowEvent oldest = new FlowEvent(Instant.parse("2026-11-10T12:37:01Z"),
+                "10.0.0.1", "GET", "example.com", 80, "HTTP", "CONNECTED", "oldest");
+            FlowEvent middle = new FlowEvent(Instant.parse("2026-11-10T12:37:02Z"),
+                "10.0.0.1", "CONNECT", "secure.example.com", 443, "HTTPS_TUNNEL", "CONNECTED", "middle");
+            FlowEvent otherClient = new FlowEvent(Instant.parse("2026-11-10T12:37:04Z"),
+                "10.0.0.2", "GET", "example.com", 80, "HTTP", "CONNECTED", "other-client");
+            searchable.append(latest);
+            searchable.append(oldest);
+            searchable.append(middle);
+            searchable.append(otherClient);
+            String filtered = searchable.recentJson(2, "10.0.0.1", "EXAMPLE.COM");
+            int middlePosition = filtered.indexOf("2026-11-10T12:37:02Z");
+            int latestPosition = filtered.indexOf("2026-11-10T12:37:03Z");
+            check(middlePosition >= 0 && latestPosition > middlePosition
+                    && !filtered.contains("oldest") && !filtered.contains("other-client"),
+                "client and case-insensitive domain filters return the latest matches in time order");
+            String oneResult = searchable.recentJson(1, "10.0.0.1", "example.com");
+            check(oneResult.contains("latest") && !oneResult.contains("middle"),
+                "maximum result count selects the newest matching record");
+            check(searchable.recentJson(10, "10.0.0.99", "").equals("[]")
+                    && searchable.recentJson(0, "", "").equals("[]"),
+                "client filters and zero result limit return an empty JSON array when unmatched");
+
             Path boundedFile = directory.resolve("bounded-history.jsonl");
             EventLog bounded = new EventLog(boundedFile);
             for (int i = 0; i < 510; i++) {
