@@ -142,6 +142,41 @@ public final class EventLogTest {
             check(boundedRestart.recentJson(1, "", "").contains("test-509"),
                 "bounded replay retains the newest persisted record");
 
+            Path legacyFile = directory.resolve("legacy-unbounded.jsonl");
+            Files.writeString(legacyFile, (validTail.json() + "\n").repeat(10_000));
+            EventLog trimmedLegacy = new EventLog(legacyFile);
+            check(Files.size(legacyFile) <= EventLog.MAX_ACTIVE_BYTES
+                    && trimmedLegacy.summaryJson().contains("\"recentTotal\":500"),
+                "startup caps an oversized legacy log and retains its newest complete records");
+
+            Path rotatingFile = directory.resolve("rotating.jsonl");
+            EventLog rotating = new EventLog(rotatingFile);
+            String largeReason = "x".repeat(10_000);
+            int rotationEventCount = 430;
+            for (int i = 0; i < rotationEventCount; i++) {
+                rotating.append(new FlowEvent(Instant.parse("2026-11-10T12:38:00Z").plusMillis(i),
+                    "10.0.0.50", "GET", "retention.example", 80, "HTTP", "CONNECTED",
+                    "event-" + i + "-" + largeReason));
+            }
+            long retainedBytes = Files.size(rotatingFile);
+            int archiveCount = 0;
+            for (int i = 1; i <= EventLog.MAX_ARCHIVE_FILES; i++) {
+                Path archive = rotatingFile.resolveSibling(rotatingFile.getFileName() + "." + i);
+                if (Files.exists(archive)) {
+                    archiveCount++;
+                    retainedBytes += Files.size(archive);
+                    check(Files.size(archive) <= EventLog.MAX_ACTIVE_BYTES,
+                        "rotated JSONL archive stays within the configured size cap");
+                }
+            }
+            check(archiveCount == EventLog.MAX_ARCHIVE_FILES
+                    && !Files.exists(rotatingFile.resolveSibling(rotatingFile.getFileName() + ".4"))
+                    && retainedBytes <= EventLog.MAX_ACTIVE_BYTES * (EventLog.MAX_ARCHIVE_FILES + 1L),
+                "retention keeps a fixed number of bounded active/archive files");
+            EventLog afterRotation = new EventLog(rotatingFile);
+            check(afterRotation.recentJson(1, "", "").contains("event-429-"),
+                "startup replay restores the newest events across rotated files");
+
             Path blockedFile = directory.resolve("is-a-directory");
             EventLog failingLog = new EventLog(blockedFile);
             Files.createDirectory(blockedFile);
