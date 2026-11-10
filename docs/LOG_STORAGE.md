@@ -23,3 +23,29 @@ On startup, the logger reads archives from oldest to newest, then the active fil
 malformed or incomplete JSONL records and restores the latest 500 valid events into bounded
 dashboard history. The on-disk files retain more history than the dashboard displays, until
 size-based retention removes the oldest archive.
+
+## Synthetic dashboard sample
+
+[`examples/synthetic-proxy-events.jsonl`](examples/synthetic-proxy-events.jsonl) contains ten
+synthetic entries for two documentation-only client IPs. It covers HTTP, HTTPS CONNECT, and
+`CONNECTED`, `FAILED`, and `DENIED` outcomes. To preview these records in the local dashboard,
+copy the fixture to the default runtime log path, then start the app:
+
+```bash
+mkdir -p data
+cp docs/examples/synthetic-proxy-events.jsonl data/proxy-events.jsonl
+bash scripts/run.sh
+```
+
+On PowerShell, use `Copy-Item docs\examples\synthetic-proxy-events.jsonl data\proxy-events.jsonl`
+before running `scripts\run.ps1`. The runtime copy is ignored by Git. Remove it before a live
+demo if you want the dashboard to show only newly proxied connections.
+
+Run focused storage, replay, filter, and dashboard integration checks after building:
+
+```bash
+bash scripts/build.sh
+java -cp build/main:build/test com.demo.netguard.monitor.EventLogTest
+```
+
+The full proxy smoke test remains `bash scripts/test.sh`.

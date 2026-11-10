@@ -52,6 +52,12 @@ public final class EventLogTest {
                     && json.chars().noneMatch(c -> c < 0x20),
                 "event JSON escapes quotes, slashes and every control character");
 
+            Path sampleFile = Path.of("docs/examples/synthetic-proxy-events.jsonl");
+            EventLog sample = new EventLog(sampleFile);
+            check(Files.readAllLines(sampleFile).size() == 10
+                    && sample.summaryJson().equals("{\"recentTotal\":10,\"connected\":6,\"failed\":2,\"denied\":2}"),
+                "synthetic dashboard fixture has ten parseable records across two clients and all outcomes");
+
             Path file = directory.resolve("events.jsonl");
             EventLog log = new EventLog(file);
             log.append(special);
