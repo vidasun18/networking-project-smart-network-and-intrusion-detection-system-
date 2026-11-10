@@ -323,6 +323,7 @@ public final class EventLog {
         for (int i = first; i < matches.size(); i++) join.add(matches.get(i).json());
         return join.toString();
     }
+    /** Returns outcome counts over the bounded retained history, not lifetime totals. */
     public synchronized String summaryJson() {
         long connected = events.stream().filter(e -> e.outcome().equals("CONNECTED")).count();
         long failed = events.stream().filter(e -> e.outcome().equals("FAILED")).count();

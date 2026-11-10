@@ -2,6 +2,10 @@ package com.demo.netguard.monitor;
 
 import com.demo.netguard.model.FlowEvent;
 import java.io.UncheckedIOException;
+import java.net.URI;
+import java.net.http.HttpClient;
+import java.net.http.HttpRequest;
+import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Instant;
@@ -20,6 +24,12 @@ public final class EventLogTest {
         if (!condition) throw new AssertionError(label);
         checks++;
         System.out.println("  OK " + label);
+    }
+
+    private static String get(HttpClient client, DashboardServer dashboard, String path) throws Exception {
+        URI uri = URI.create("http://127.0.0.1:" + dashboard.port() + path);
+        HttpRequest request = HttpRequest.newBuilder(uri).GET().build();
+        return client.send(request, HttpResponse.BodyHandlers.ofString()).body();
     }
 
     public static void main(String[] args) throws Exception {
@@ -129,6 +139,35 @@ public final class EventLogTest {
             check(searchable.recentJson(10, "10.0.0.99", "").equals("[]")
                     && searchable.recentJson(0, "", "").equals("[]"),
                 "client filters and zero result limit return an empty JSON array when unmatched");
+
+            EventLog dashboardLog = new EventLog(directory.resolve("dashboard.jsonl"));
+            dashboardLog.append(new FlowEvent(Instant.parse("2026-11-10T12:40:01Z"),
+                "10.0.0.7", "GET", "api.example.com", 80, "HTTP", "CONNECTED", "UPSTREAM_TCP_CONNECTED"));
+            dashboardLog.append(new FlowEvent(Instant.parse("2026-11-10T12:40:02Z"),
+                "10.0.0.7", "GET", "example.org", 80, "HTTP", "FAILED", "UPSTREAM_CONNECTION_FAILURE"));
+            dashboardLog.append(new FlowEvent(Instant.parse("2026-11-10T12:40:03Z"),
+                "10.0.0.8", "CONNECT", "example.com", 443, "HTTPS_TUNNEL", "DENIED", "DESTINATION_POLICY"));
+            dashboardLog.append(new FlowEvent(Instant.parse("2026-11-10T12:40:04Z"),
+                "10.0.0.7", "CONNECT", "secure.example.com", 443, "HTTPS_TUNNEL", "CONNECTED",
+                "UPSTREAM_TCP_CONNECTED"));
+            HttpClient http = HttpClient.newHttpClient();
+            try (DashboardServer dashboard = new DashboardServer(0, dashboardLog)) {
+                dashboard.start();
+                String apiEvents = get(http, dashboard,
+                    "/api/events?client=10.0.0.7&domain=EXAMPLE.COM&limit=10");
+                int firstTimestamp = apiEvents.indexOf("2026-11-10T12:40:01Z");
+                int latestTimestamp = apiEvents.indexOf("2026-11-10T12:40:04Z");
+                check(firstTimestamp >= 0 && latestTimestamp > firstTimestamp
+                        && !apiEvents.contains("example.org") && !apiEvents.contains("10.0.0.8"),
+                    "dashboard events endpoint delegates filters and preserves chronological timestamps");
+                String limited = get(http, dashboard,
+                    "/api/events?client=10.0.0.7&domain=example.com&limit=1");
+                check(limited.contains("secure.example.com") && !limited.contains("api.example.com"),
+                    "dashboard events endpoint enforces the maximum result count");
+                String summary = get(http, dashboard, "/api/summary");
+                check(summary.equals("{\"recentTotal\":4,\"connected\":2,\"failed\":1,\"denied\":1}"),
+                    "dashboard summary endpoint exposes EventLog outcome statistics");
+            }
 
             Path boundedFile = directory.resolve("bounded-history.jsonl");
             EventLog bounded = new EventLog(boundedFile);
