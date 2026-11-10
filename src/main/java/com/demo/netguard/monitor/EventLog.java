@@ -10,28 +10,44 @@ import java.nio.file.*;
 import java.time.Instant;
 import java.util.*;
 
-/** Thread-safe append-only JSONL file and bounded dashboard history restored at startup.
+/** Thread-safe append-only JSONL file with bounded rotation and dashboard history restored at startup.
  *  Synchronized appends serialize writes from concurrent proxy workers so each client event
- *  is stored as a complete JSONL record. Replay reads at most the final 4 MiB and keeps the
- *  latest 500 valid event records.
+ *  is stored as a complete JSONL record. The active file and each of three archives are capped
+ *  at 1 MiB. Replay keeps the latest 500 valid event records.
  */
 public final class EventLog {
     private final Deque<FlowEvent> events = new ArrayDeque<>();
     private final Path file;
     private static final int LIMIT = 500;
-    private static final long REPLAY_BYTE_LIMIT = 4L * 1024 * 1024;
+    static final long MAX_ACTIVE_BYTES = 1024L * 1024;
+    static final int MAX_ARCHIVE_FILES = 3;
     private boolean needsLineSeparator;
 
     public EventLog(Path file) throws IOException {
         this.file = Objects.requireNonNull(file, "file").toAbsolutePath().normalize();
         if (this.file.getParent() != null) Files.createDirectories(this.file.getParent());
+        for (int index = 1; index <= MAX_ARCHIVE_FILES; index++) {
+            trimOversizedLog(archivePath(index));
+        }
+        trimOversizedLog(this.file);
         restoreRecentEvents();
     }
 
     public synchronized void append(FlowEvent event) {
         Objects.requireNonNull(event, "event");
         try {
-            String line = (needsLineSeparator ? "\n" : "") + event.json() + "\n";
+            String record = event.json() + "\n";
+            int recordBytes = record.getBytes(StandardCharsets.UTF_8).length;
+            if (recordBytes > MAX_ACTIVE_BYTES) {
+                throw new IOException("Event exceeds the maximum JSONL file size of " + MAX_ACTIVE_BYTES + " bytes");
+            }
+            long activeSize = Files.exists(file) ? Files.size(file) : 0;
+            long requiredBytes = recordBytes + (needsLineSeparator ? 1 : 0);
+            if (activeSize > MAX_ACTIVE_BYTES - requiredBytes) {
+                if (activeSize > 0) rotateFiles();
+                else needsLineSeparator = false;
+            }
+            String line = (needsLineSeparator ? "\n" : "") + record;
             Files.writeString(file, line, StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
         } catch (IOException e) {
@@ -43,23 +59,27 @@ public final class EventLog {
     }
 
     private void restoreRecentEvents() throws IOException {
-        if (!Files.exists(file)) return;
-        long size = Files.size(file);
+        for (int index = MAX_ARCHIVE_FILES; index > 0; index--) {
+            restoreFile(archivePath(index), false);
+        }
+        restoreFile(file, true);
+    }
+
+    private void restoreFile(Path source, boolean active) throws IOException {
+        if (!Files.exists(source)) return;
+        long size = Files.size(source);
         if (size == 0) return;
 
-        long start = Math.max(0, size - REPLAY_BYTE_LIMIT);
+        long start = Math.max(0, size - MAX_ACTIVE_BYTES);
         int byteCount = Math.toIntExact(size - start);
-        byte[] tail = new byte[byteCount];
-        try (FileChannel channel = FileChannel.open(file, StandardOpenOption.READ)) {
-            channel.position(start);
-            ByteBuffer buffer = ByteBuffer.wrap(tail);
-            while (buffer.hasRemaining()) {
-                if (channel.read(buffer) < 0) break;
-            }
-            ByteBuffer finalByte = ByteBuffer.allocate(1);
-            channel.position(size - 1);
-            if (channel.read(finalByte) == 1) {
-                needsLineSeparator = finalByte.array()[0] != (byte) '\n';
+        byte[] tail = readRange(source, start, byteCount);
+        if (active) {
+            try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
+                ByteBuffer finalByte = ByteBuffer.allocate(1);
+                channel.position(size - 1);
+                if (channel.read(finalByte) == 1) {
+                    needsLineSeparator = finalByte.array()[0] != (byte) '\n';
+                }
             }
         }
 
@@ -77,6 +97,55 @@ public final class EventLog {
             } catch (IllegalArgumentException ignored) {
                 // A damaged or unsupported JSONL line must not prevent later records from loading.
             }
+        }
+    }
+
+    private byte[] readRange(Path source, long start, int byteCount) throws IOException {
+        byte[] bytes = new byte[byteCount];
+        try (FileChannel channel = FileChannel.open(source, StandardOpenOption.READ)) {
+            channel.position(start);
+            ByteBuffer buffer = ByteBuffer.wrap(bytes);
+            while (buffer.hasRemaining()) {
+                if (channel.read(buffer) < 0) break;
+            }
+        }
+        return bytes;
+    }
+
+    private void trimOversizedLog(Path logFile) throws IOException {
+        if (!Files.exists(logFile) || Files.size(logFile) <= MAX_ACTIVE_BYTES) return;
+        long size = Files.size(logFile);
+        long start = size - MAX_ACTIVE_BYTES;
+        String text = new String(readRange(logFile, start, (int) MAX_ACTIVE_BYTES), StandardCharsets.UTF_8);
+        int firstNewline = text.indexOf('\n');
+        String retainedTail = firstNewline < 0 ? "" : text.substring(firstNewline + 1);
+        Path temp = Files.createTempFile(logFile.getParent(), "netguard-", ".retention");
+        try {
+            Files.writeString(temp, retainedTail, StandardCharsets.UTF_8,
+                StandardOpenOption.WRITE, StandardOpenOption.TRUNCATE_EXISTING);
+            moveReplace(temp, logFile);
+        } finally {
+            Files.deleteIfExists(temp);
+        }
+    }
+
+    private void rotateFiles() throws IOException {
+        for (int index = MAX_ARCHIVE_FILES; index >= 1; index--) {
+            Path source = index == 1 ? file : archivePath(index - 1);
+            if (Files.exists(source)) moveReplace(source, archivePath(index));
+        }
+        needsLineSeparator = false;
+    }
+
+    private Path archivePath(int index) {
+        return file.resolveSibling(file.getFileName() + "." + index);
+    }
+
+    private static void moveReplace(Path source, Path target) throws IOException {
+        try {
+            Files.move(source, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+        } catch (AtomicMoveNotSupportedException e) {
+            Files.move(source, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }
 
