@@ -1,0 +1,10 @@
+{"at":"2026-11-10T08:00:00Z","sourceIp":"192.0.2.10","method":"GET","destination":"example.com","port":80,"protocol":"HTTP","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
+{"at":"2026-11-10T08:01:00Z","sourceIp":"192.0.2.10","method":"HEAD","destination":"static.example.org","port":80,"protocol":"HTTP","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
+{"at":"2026-11-10T08:02:00Z","sourceIp":"192.0.2.10","method":"CONNECT","destination":"secure.example.net","port":443,"protocol":"HTTPS_TUNNEL","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
+{"at":"2026-11-10T08:03:00Z","sourceIp":"192.0.2.10","method":"GET","destination":"unavailable.example.com","port":80,"protocol":"HTTP","outcome":"FAILED","reason":"UPSTREAM_CONNECTION_FAILURE"}
+{"at":"2026-11-10T08:04:00Z","sourceIp":"192.0.2.10","method":"CONNECT","destination":"blocked.example.net","port":443,"protocol":"HTTPS_TUNNEL","outcome":"DENIED","reason":"DESTINATION_POLICY"}
+{"at":"2026-11-10T08:05:00Z","sourceIp":"198.51.100.20","method":"GET","destination":"example.com","port":80,"protocol":"HTTP","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
+{"at":"2026-11-10T08:06:00Z","sourceIp":"198.51.100.20","method":"HEAD","destination":"docs.example.org","port":80,"protocol":"HTTP","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
+{"at":"2026-11-10T08:07:00Z","sourceIp":"198.51.100.20","method":"CONNECT","destination":"unavailable.example.net","port":443,"protocol":"HTTPS_TUNNEL","outcome":"FAILED","reason":"UPSTREAM_CONNECTION_FAILURE"}
+{"at":"2026-11-10T08:08:00Z","sourceIp":"198.51.100.20","method":"GET","destination":"restricted.example.com","port":80,"protocol":"HTTP","outcome":"DENIED","reason":"DESTINATION_POLICY"}
+{"at":"2026-11-10T08:09:00Z","sourceIp":"198.51.100.20","method":"CONNECT","destination":"video.example.net","port":443,"protocol":"HTTPS_TUNNEL","outcome":"CONNECTED","reason":"UPSTREAM_TCP_CONNECTED"}
